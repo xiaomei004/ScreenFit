@@ -16,10 +16,29 @@ export interface VideoMeta {
   height?: number;
 }
 
+export interface AudioMeta {
+  codec: 'opus' | 'aac' | 'flac' | 'raw';
+}
+
+export interface StartSessionOptions {
+  serial: string;
+  maxSize?: number;
+  videoCodec?: VideoMeta['codec'];
+  newDisplay?: string;
+  flexDisplay?: boolean;
+  startApp?: string;
+  keepActive?: boolean;
+  audio?: boolean;
+  /** output=整机输出(会静音手机) / playback=抓取播放中的声音(App可拒绝) / mic=麦克风 */
+  audioSource?: 'output' | 'playback' | 'mic';
+  /** 抓 playback 时让手机同时外放 */
+  audioDup?: boolean;
+}
+
 export type AppStatus =
   | { phase: 'idle' }
   | { phase: 'connecting'; message: string }
-  | { phase: 'streaming'; meta?: VideoMeta }
+  | { phase: 'streaming'; meta?: VideoMeta; audio?: boolean }
   | { phase: 'error'; message: string };
 
 /** 渲染进程 -> 主进程（反向控制） */
@@ -34,7 +53,9 @@ export type ControlMessage =
 /** 主进程 -> 渲染进程 */
 export type StreamMessage =
   | { type: 'meta'; meta: VideoMeta }
-  | { type: 'frame'; data: ArrayBuffer; pts: number; keyframe: boolean; config: boolean };
+  | { type: 'frame'; data: ArrayBuffer; pts: number; keyframe: boolean; config: boolean }
+  | { type: 'audio-meta'; meta: AudioMeta }
+  | { type: 'audio'; data: ArrayBuffer; pts: number };
 
 export const IPC = {
   openVideoChannel: 'video:open-channel',
@@ -44,6 +65,7 @@ export const IPC = {
   stopSession: 'scrcpy:stop',
   status: 'status',
   setFitMode: 'view:set-fit',
+  toggleFullscreen: 'view:toggle-fullscreen',
 } as const;
 
 export const PORTS = {

@@ -1,25 +1,15 @@
-import type { AppStatus, DeviceInfo, FitMode } from '../shared/types';
-
-export interface StartSessionInput {
-  serial: string;
-  maxSize?: number;
-  videoCodec?: 'h264' | 'h265' | 'av1';
-  newDisplay?: string;
-  flexDisplay?: boolean;
-  startApp?: string;
-  keepActive?: boolean;
-  audio?: boolean;
-}
+import type { AppStatus, DeviceInfo, FitMode, StartSessionOptions } from '../shared/types';
 
 declare global {
   interface Window {
     screenfit: {
       listDevices(): Promise<DeviceInfo[]>;
-      startSession(options: StartSessionInput): Promise<void>;
+      startSession(options: StartSessionOptions): Promise<void>;
       stopSession(): Promise<void>;
       setFitMode(mode: FitMode): Promise<void>;
       openVideoChannel(): Promise<boolean>;
       forwardVideoPort(): void;
+      toggleFullscreen(): Promise<boolean>;
       onStatus(callback: (status: AppStatus) => void): () => void;
     };
   }

@@ -78,6 +78,21 @@ canvas {
   flex: 1;
 }
 
+#hud .check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+#hud .check input {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  accent-color: #378add;
+}
+
 #status {
   position: absolute;
   bottom: 12px;

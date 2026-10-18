@@ -2,7 +2,7 @@ import * as net from 'node:net';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import type { Adb } from './adb.js';
-import type { VideoMeta } from '../shared/types.js';
+import type { AudioMeta, VideoMeta } from '../shared/types.js';
 
 export const SERVER_VERSION = '5.0.1';
 const DEVICE_SERVER_PATH = '/data/local/tmp/scrcpy-server.jar';
@@ -29,6 +29,10 @@ export interface ScrcpyOptions {
   startApp?: string;
   keepActive?: boolean;
   audio?: boolean;
+  /** output(默认) / playback / mic —— 对应 server 的 audio_source */
+  audioSource?: 'output' | 'playback' | 'mic';
+  /** 仅 playback 源下可让手机同时外放 */
+  audioDup?: boolean;
 }
 
 export interface VideoPacket {
@@ -38,10 +42,25 @@ export interface VideoPacket {
   config: boolean;
 }
 
+export interface AudioPacket {
+  data: Buffer;
+  pts: number;
+}
+
+/** audio socket 起始的 4 字节 FourCC："opus"(默认) / "aac\0" / "flac" / "raw\0" */
+const AUDIO_CODEC_FOURCC: Record<string, AudioMeta['codec']> = {
+  opus: 'opus',
+  'aac\0': 'aac',
+  flac: 'flac',
+  'raw\0': 'raw',
+};
+
 export interface ScrcpyHandlers {
   onStatus?(message: string): void;
   onMeta?(meta: VideoMeta): void;
   onVideo?(packet: VideoPacket): void;
+  onAudioMeta?(meta: AudioMeta): void;
+  onAudio?(packet: AudioPacket): void;
   onExit?(code: number | null): void;
 }
 
@@ -59,8 +78,9 @@ export class ScrcpySession {
   private controlSocket?: net.Socket;
   private child?: ChildProcessWithoutNullStreams;
   private running = false;
-  private pendingData: Buffer = Buffer.alloc(0);
-  private dataWaiter?: () => void;
+  // 视频与音频各有独立缓冲区，共用一个会互相污染导致解析错位
+  private buffers: { video: Buffer; audio: Buffer } = { video: Buffer.alloc(0), audio: Buffer.alloc(0) };
+  private dataWaiters: { video?: () => void; audio?: () => void } = {};
   private streamError?: Error;
   private pendingSockets: net.Socket[] = [];
   private connectionWaiter?: () => void;
@@ -83,7 +103,8 @@ export class ScrcpySession {
     const socketName = `scrcpy_${scid.toString(16).padStart(8, '0')}`;
     this.serial = options.serial;
     this.socketName = socketName;
-    this.pendingData = Buffer.alloc(0);
+    this.buffers = { video: Buffer.alloc(0), audio: Buffer.alloc(0) };
+    this.dataWaiters = {};
     this.streamError = undefined;
     this.pendingSockets = [];
     this.connectionWaiter = undefined;
@@ -125,6 +146,7 @@ export class ScrcpySession {
     }
 
     void this.readVideoLoop();
+    if (options.audio) void this.readAudioLoop();
   }
 
   async stop(): Promise<void> {
@@ -136,12 +158,19 @@ export class ScrcpySession {
   }
 
   private buildServerArgs(scid: number, options: ScrcpyOptions): string[] {
-    const params = [`scid=${scid.toString(16).padStart(8, '0')}`, 'log_level=info'];
+    const params = [`scid=${scid.toString(16).padStart(8, '0')}`, 'log_level=debug'];
     if (options.maxSize) params.push(`max_size=${options.maxSize}`);
     if (options.maxFps) params.push(`max_fps=${options.maxFps}`);
     if (options.videoCodec && options.videoCodec !== 'h264') params.push(`video_codec=${options.videoCodec}`);
     if (options.videoBitRate) params.push(`video_bit_rate=${options.videoBitRate}`);
     if (options.audio === false) params.push('audio=false');
+    else if (options.audio) {
+      params.push('audio=true');
+      if (options.audioSource && options.audioSource !== 'output') {
+        params.push(`audio_source=${options.audioSource}`);
+      }
+      if (options.audioDup) params.push('audio_dup=true');
+    }
     if (options.newDisplay) params.push(`new_display=${options.newDisplay}`);
     if (options.flexDisplay) params.push('flex_display=true');
     if (options.keepActive) params.push('keep_active=true');
@@ -169,6 +198,7 @@ export class ScrcpySession {
       server.on('connection', (socket) => {
         socket.setNoDelay(true);
         this.pendingSockets.push(socket);
+        this.handlers.onStatus?.(`[tunnel] 连接到达，队列=${this.pendingSockets.length}`);
         const waiter = this.connectionWaiter;
         this.connectionWaiter = undefined;
         waiter?.();
@@ -189,7 +219,10 @@ export class ScrcpySession {
     const deadline = Date.now() + 20_000;
     for (;;) {
       const socket = this.pendingSockets.shift();
-      if (socket) return socket;
+      if (socket) {
+        this.handlers.onStatus?.(`[tunnel] 取出连接 ${label}，剩余=${this.pendingSockets.length}`);
+        return socket;
+      }
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error(`等待设备连接（${label}）超时`);
       await new Promise<void>((resolve) => {
@@ -204,11 +237,17 @@ export class ScrcpySession {
     this.videoSocket = await this.accept('video');
     // v5 reverse 模式下视频 socket 直接发设备名，无 dummy 字节
     // 必须在 readVideoHeader 之前绑定数据事件，否则 readExact 永远等不到数据
-    this.attachVideoData();
+    this.attachData(this.videoSocket, 'video');
 
     if (audio) {
       this.handlers.onStatus?.('等待设备连接音频通道');
       this.audioSocket = await this.accept('audio');
+      this.attachData(this.audioSocket, 'audio');
+      // audio socket 开头只有 4 字节 codec FourCC（无设备名、无 session packet）
+      const codecBuf = await this.readExact(this.audioSocket, 4, 'audio');
+      const fourcc = codecBuf.toString('latin1');
+      const codec = AUDIO_CODEC_FOURCC[fourcc] ?? 'opus';
+      this.handlers.onAudioMeta?.({ codec });
     }
 
     this.handlers.onStatus?.('等待设备连接控制通道');
@@ -270,42 +309,70 @@ export class ScrcpySession {
     }
   }
 
-  /** 视频 socket 的数据持续累积到 pendingData，readExact 从中切片，避免丢字节 */
-  private attachVideoData(): void {
-    const socket = this.videoSocket;
+  /** 音频流：与视频相同的 12 字节 media packet 头，但无 session packet */
+  private async readAudioLoop(): Promise<void> {
+    const socket = this.audioSocket;
     if (!socket) return;
-    socket.on('data', (chunk: Buffer) => {
-      this.pendingData =
-        this.pendingData.length === 0 ? chunk : Buffer.concat([this.pendingData, chunk]);
-      if (this.dataWaiter) {
-        const waiter = this.dataWaiter;
-        this.dataWaiter = undefined;
-        waiter();
+    try {
+      while (this.running) {
+        const header = await this.readExact(socket, 12, 'audio');
+        const ptsFlags = header.readBigUInt64BE(0);
+        const size = header.readUInt32BE(8);
+        const payload = await this.readExact(socket, size, 'audio');
+        this.handlers.onAudio?.({ data: payload, pts: Number(ptsFlags & PTS_MASK) });
       }
+    } catch (err) {
+      if (this.running) {
+        this.handlers.onStatus?.(`音频流中断: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  /** socket 数据持续累积到对应缓冲区，readExact 从中切片，避免丢字节 */
+  private attachData(socket: net.Socket, kind: 'video' | 'audio'): void {
+    socket.once('data', (chunk: Buffer) => {
+      this.handlers.onStatus?.(`[${kind}] 首字节 x${chunk.length}: ${chunk.subarray(0, 16).toString('hex')}`);
+    });
+    socket.on('data', (chunk: Buffer) => {
+      const current = this.buffers[kind];
+      this.buffers[kind] =
+        current.length === 0 ? chunk : Buffer.concat([current, chunk]);
+      const waiter = this.dataWaiters[kind];
+      this.dataWaiters[kind] = undefined;
+      waiter?.();
     });
     socket.on('error', (err: Error) => {
       this.streamError = err;
-      this.dataWaiter?.();
-      this.dataWaiter = undefined;
+      this.wakeWaiters();
     });
     socket.on('close', () => {
       this.streamError = this.streamError ?? new Error('设备连接已关闭');
-      this.dataWaiter?.();
-      this.dataWaiter = undefined;
+      this.wakeWaiters();
     });
   }
 
-  private async readExact(socket: net.Socket, length: number, tag = ''): Promise<Buffer> {
+  private wakeWaiters(): void {
+    this.dataWaiters.video?.();
+    this.dataWaiters.audio?.();
+    this.dataWaiters = {};
+  }
+
+  private async readExact(
+    _socket: net.Socket,
+    length: number,
+    kind: 'video' | 'audio' = 'video',
+  ): Promise<Buffer> {
     if (length === 0) return Buffer.alloc(0);
     for (;;) {
       if (this.streamError) throw this.streamError;
-      if (this.pendingData.length >= length) {
-        const out = this.pendingData.subarray(0, length);
-        this.pendingData = this.pendingData.subarray(length);
+      const buffer = this.buffers[kind];
+      if (buffer.length >= length) {
+        const out = buffer.subarray(0, length);
+        this.buffers[kind] = buffer.subarray(length);
         return out;
       }
       await new Promise<void>((resolve) => {
-        this.dataWaiter = resolve;
+        this.dataWaiters[kind] = resolve;
       });
       if (this.streamError) throw this.streamError;
     }

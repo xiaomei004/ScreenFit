@@ -5,7 +5,7 @@ import type { BrowserWindow as BrowserWindowType, MessagePortMain } from 'electr
 import { Adb } from './adb.js';
 import { KEYCODE_APP_SWITCH, KEYCODE_BACK, KEYCODE_HOME, ScrcpySession } from './scrcpy.js';
 import { IPC } from '../shared/types.js';
-import type { AppStatus, ControlMessage } from '../shared/types.js';
+import type { AppStatus, ControlMessage, StartSessionOptions } from '../shared/types.js';
 
 const { app, BrowserWindow, ipcMain, MessageChannelMain } = electron;
 
@@ -18,6 +18,13 @@ let startingSession = false;
 let videoPort: MessagePortMain | null = null;
 let mainWindow: BrowserWindowType | null = null;
 let activeSerial = '';
+// 会话代数：旧会话的退出事件不应触发重连
+let sessionGeneration = 0;
+let manualStop = false;
+let lastOptions: StartSessionOptions | null = null;
+let reconnectTimer: NodeJS.Timeout | null = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT = 5;
 
 const SERVER_JAR =
   process.env.SCREENFIT_SERVER_JAR ??
@@ -97,6 +104,91 @@ function handleControl(message: ControlMessage): void {
 
 let pendingTap: { x: number; y: number } | null = null;
 
+async function launchSession(options: StartSessionOptions): Promise<void> {
+  if (startingSession) return;
+  startingSession = true;
+  console.log('[ipc] startSession', JSON.stringify(options));
+  manualStop = false;
+  lastOptions = options;
+  const generation = ++sessionGeneration;
+
+  try {
+    if (session?.isRunning) await session.stop();
+    activeSerial = options.serial;
+    session = new ScrcpySession(adb, {
+      onStatus: (message) => setStatus({ phase: 'connecting', message }),
+      onMeta: (meta) => {
+        videoPort?.postMessage({ type: 'meta', meta });
+        setStatus({ phase: 'streaming', meta, audio: Boolean(options.audio) });
+        reconnectAttempts = 0;
+      },
+      onVideo: (packet) => {
+        const copy = new Uint8Array(packet.data);
+        videoPort?.postMessage({
+          type: 'frame',
+          data: copy.buffer,
+          pts: packet.pts,
+          keyframe: packet.keyframe,
+          config: packet.config,
+        });
+      },
+      onAudioMeta: (meta) => {
+        videoPort?.postMessage({ type: 'audio-meta', meta });
+        setStatus({ phase: 'connecting', message: `音频已就绪（${meta.codec}）` });
+      },
+      onAudio: (packet) => {
+        const copy = new Uint8Array(packet.data);
+        videoPort?.postMessage({ type: 'audio', data: copy.buffer, pts: packet.pts });
+      },
+      onExit: (code) => {
+        console.log('[ipc] scrcpy-server 退出, code=', code);
+        if (generation !== sessionGeneration) return;
+        setStatus({ phase: 'idle' });
+        scheduleReconnect(generation);
+      },
+    });
+
+    try {
+      await session.start({
+        serial: options.serial,
+        serverJar: SERVER_JAR,
+        maxSize: options.maxSize ?? 1920,
+        videoCodec: options.videoCodec ?? 'h264',
+        newDisplay: options.newDisplay,
+        flexDisplay: options.flexDisplay ?? false,
+        startApp: options.startApp,
+        keepActive: options.keepActive ?? true,
+        audio: options.audio ?? false,
+        audioSource: options.audioSource,
+        audioDup: options.audioDup,
+      });
+    } catch (err) {
+      if (generation === sessionGeneration) {
+        setStatus({ phase: 'error', message: (err as Error).message });
+        scheduleReconnect(generation);
+      }
+      throw err;
+    }
+  } finally {
+    startingSession = false;
+  }
+}
+
+/** 非人为停止的中断自动重连，指数退避，最多 MAX_RECONNECT 次 */
+function scheduleReconnect(generation: number): void {
+  if (manualStop || !lastOptions || reconnectAttempts >= MAX_RECONNECT) return;
+  const attempt = reconnectAttempts + 1;
+  const delay = Math.min(1000 * 2 ** (attempt - 1), 8000);
+  reconnectAttempts = attempt;
+  setStatus({ phase: 'connecting', message: `连接中断，${delay / 1000} 秒后重连（第 ${attempt} 次）` });
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (generation !== sessionGeneration || manualStop) return;
+    console.log('[ipc] 自动重连 attempt', attempt);
+    void launchSession(lastOptions as StartSessionOptions).catch(() => undefined);
+  }, delay);
+}
+
 function registerIpc(): void {
   ipcMain.handle(IPC.listDevices, async () => {
     try {
@@ -118,63 +210,31 @@ function registerIpc(): void {
     return true;
   });
 
-  ipcMain.handle(IPC.startSession, async (_event, options) => {
+  ipcMain.handle(IPC.startSession, async (_event, options: StartSessionOptions) => {
     if (startingSession) {
       console.log('[status] 已有会话正在建立，忽略重复请求');
       return;
     }
-    startingSession = true;
-    console.log('[ipc] startSession', JSON.stringify(options));
-    try {
-      if (session?.isRunning) await session.stop();
-      activeSerial = options.serial;
-    session = new ScrcpySession(adb, {
-      onStatus: (message) => setStatus({ phase: 'connecting', message }),
-      onMeta: (meta) => {
-        videoPort?.postMessage({ type: 'meta', meta });
-        setStatus({ phase: 'streaming', meta });
-      },
-      onVideo: (packet) => {
-        const copy = new Uint8Array(packet.data);
-        videoPort?.postMessage({
-          type: 'frame',
-          data: copy.buffer,
-          pts: packet.pts,
-          keyframe: packet.keyframe,
-          config: packet.config,
-        });
-      },
-      onExit: (code) => {
-        console.log('[ipc] scrcpy-server 退出, code=', code);
-        setStatus({ phase: 'idle' });
-      },
-    });
-
-    try {
-      await session.start({
-        serial: options.serial,
-        serverJar: SERVER_JAR,
-        maxSize: options.maxSize ?? 1920,
-        videoCodec: options.videoCodec ?? 'h264',
-        newDisplay: options.newDisplay,
-        flexDisplay: options.flexDisplay ?? false,
-        startApp: options.startApp,
-        keepActive: options.keepActive ?? true,
-        audio: options.audio ?? false,
-      });
-      } catch (err) {
-        setStatus({ phase: 'error', message: (err as Error).message });
-        throw err;
-      }
-    } finally {
-      startingSession = false;
-    }
+    await launchSession(options);
   });
 
   ipcMain.handle(IPC.stopSession, async () => {
+    manualStop = true;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    sessionGeneration++;
     await session?.stop();
     session = null;
     setStatus({ phase: 'idle' });
+  });
+
+  ipcMain.handle(IPC.toggleFullscreen, async () => {
+    const win = mainWindow;
+    if (!win) return false;
+    win.setFullScreen(!win.isFullScreen());
+    return win.isFullScreen();
   });
 
   // 渲染进程本地已切换渲染模式，这里仅接收以避免未注册报错（后续可按 App 持久化）

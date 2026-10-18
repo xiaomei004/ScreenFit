@@ -1,6 +1,7 @@
 import { FitRenderer } from './render';
 import { StreamDecoder } from './decoder';
-import type { ControlMessage, FitMode, StreamMessage } from '../shared/types';
+import { AudioPlayer } from './audio';
+import type { ControlMessage, FitMode, StartSessionOptions, StreamMessage } from '../shared/types';
 
 const el = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -11,6 +12,8 @@ const statusEl = el<HTMLDivElement>('status');
 const deviceSelect = el<HTMLSelectElement>('device');
 const displayInput = el<HTMLInputElement>('display');
 const pkgInput = el<HTMLInputElement>('pkg');
+const audioToggle = el<HTMLInputElement>('audio');
+const muteButton = el<HTMLButtonElement>('mute');
 
 const renderer = new FitRenderer(bg, fg);
 let port: MessagePort | null = null;
@@ -19,6 +22,12 @@ const decoder = new StreamDecoder(
   (frame) => renderer.draw(frame),
   (message) => setStatus(message),
 );
+
+const audioPlayer = new AudioPlayer((message) => setStatus(`音频：${message}`));
+
+function audioOptions(): Pick<StartSessionOptions, 'audio' | 'audioSource'> {
+  return audioToggle.checked ? { audio: true, audioSource: 'output' } : { audio: false };
+}
 
 function setStatus(text: string): void {
   statusEl.textContent = text;
@@ -55,6 +64,8 @@ window.addEventListener('message', (event) => {
   videoPort.onmessage = (e: MessageEvent<StreamMessage>) => {
     const message = e.data;
     if (message.type === 'meta') decoder.setMeta(message.meta);
+    else if (message.type === 'audio-meta') audioPlayer.setMeta(message.meta);
+    else if (message.type === 'audio') audioPlayer.feed(message);
     else decoder.feed(message);
   };
   videoPort.start();
@@ -80,7 +91,11 @@ if (location.hash.includes('auto')) {
       clearInterval(autoTimer);
       setStatus('自动连接设备…');
       console.log('[ui] auto-connect 触发 startSession');
-      void window.screenfit.startSession({ serial: devices[0].serial, maxSize: 1280 });
+      void window.screenfit.startSession({
+        serial: devices[0].serial,
+        maxSize: 1280,
+        ...audioOptions(),
+      });
     });
   }, 1000);
 }
@@ -89,7 +104,7 @@ el<HTMLButtonElement>('connect').onclick = async () => {
   const serial = deviceSelect.value;
   if (!serial) return setStatus('先选择一台设备');
   console.log('[ui] connect 按钮触发');
-  await window.screenfit.startSession({ serial, maxSize: 1920 });
+  await window.screenfit.startSession({ serial, maxSize: 1920, ...audioOptions() });
 };
 
 el<HTMLButtonElement>('start-app').onclick = async () => {
@@ -103,11 +118,20 @@ el<HTMLButtonElement>('start-app').onclick = async () => {
     flexDisplay: true,
     startApp: pkgInput.value.trim() || undefined,
     keepActive: true,
+    ...audioOptions(),
   });
 };
 
 el<HTMLButtonElement>('stop').onclick = async () => {
+  audioPlayer.reset();
   await window.screenfit.stopSession();
+};
+
+el<HTMLButtonElement>('fullscreen').onclick = () => void window.screenfit.toggleFullscreen();
+
+muteButton.onclick = () => {
+  audioPlayer.setMuted(!audioPlayer.isMuted);
+  muteButton.textContent = audioPlayer.isMuted ? '取消静音' : '静音';
 };
 
 for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>('.mode'))) {
@@ -156,6 +180,8 @@ window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') send({ type: 'back' });
   else if (event.key === 'h') send({ type: 'home' });
   else if (event.key === 's') send({ type: 'switch-app' });
+  else if (event.key === 'f') void window.screenfit.toggleFullscreen();
+  else if (event.key === 'm') muteButton.click();
 });
 
 let hideTimer = 0;

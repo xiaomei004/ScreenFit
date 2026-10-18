@@ -27,14 +27,18 @@ const port = await new Promise((res) => {
 console.log(`reverse ${sockName} -> tcp:${port}`);
 await adb.reverse(SERIAL, `localabstract:${sockName}`, port);
 
+const WITH_AUDIO = process.env.SF_AUDIO === '1';
 const args = [
   '-s', SERIAL, 'shell',
   `CLASSPATH=${REMOTE}`,
   'app_process', '/', 'com.genymobile.scrcpy.Server', '5.0.1',
-  `scid=${scidHex}`, 'log_level=info',
-  'video=true', 'audio=false', 'control=true',
+  `scid=${scidHex}`, 'log_level=debug',
+  'video=true', 'control=true',
+  `audio=${WITH_AUDIO ? 'true' : 'false'}`,
   `max_size=${MAX_SIZE}`,
+  ...(process.env.SF_KEEP_ACTIVE === '1' ? ['keep_active=true'] : []),
 ];
+console.log('audio:', WITH_AUDIO);
 console.log('spawn server:', args.join(' '));
 const child = spawn('adb', args, { windowsHide: true });
 child.stdout.on('data', (d) => console.log('[srv]', d.toString().trim()));
@@ -50,14 +54,21 @@ server.on('connection', (socket) => {
   console.log(`=== SOCKET #${idx} CONNECTED at ${Date.now() % 100000}ms ===`);
   socket.setNoDelay(true);
   let first = Buffer.alloc(0);
+  let logged = false;
+  const logTimer = setTimeout(() => {
+    if (!logged) { logged = true; console.log(`  socket#${idx} 3秒内无数据（control?）`); }
+  }, 3000);
   socket.on('data', (chunk) => {
+    if (!logged) {
+      logged = true;
+      clearTimeout(logTimer);
+      console.log(`  socket#${idx} 首字节(${chunk.length}):`, chunk.subarray(0, 20).toString('hex'));
+    }
     if (idx === 1) {
       collected = collected.length ? Buffer.concat([collected, chunk]) : chunk;
       if (!dumped && collected.length >= 220) { dumped = true; dump(); }
-    } else if (first.length < 64) {
-      first = first.length ? Buffer.concat([first, chunk]) : chunk;
-      console.log(`  socket#${idx} first bytes(${first.length}):`, first.subarray(0, 32).toString('hex'));
     }
+    first = first.length ? Buffer.concat([first, chunk]) : chunk;
   });
   socket.on('error', (e) => console.log(`socket#${idx} error:`, e.message));
 });
