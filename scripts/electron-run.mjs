@@ -14,7 +14,9 @@ delete env.ELECTRON_RUN_AS_NODE;
 
 // 部分 Windows 环境下 GPU 进程会因为沙箱崩溃，默认关掉沙箱；可用 SCREENFIT_ELECTRON_ARGS 追加参数
 const extraArgs = process.env.SCREENFIT_ELECTRON_ARGS ? process.env.SCREENFIT_ELECTRON_ARGS.split(' ').filter(Boolean) : [];
-const args = ['.', '--no-sandbox', '--disable-gpu-sandbox', ...extraArgs];
+// 无额外参数时启动应用本体；有参数时把参数当作要运行的脚本（例如 scripts/screenshot.mjs）
+const userArgs = process.argv.slice(2);
+const args = [...(userArgs.length > 0 ? userArgs : ['.']), '--no-sandbox', '--disable-gpu-sandbox', ...extraArgs];
 
 const child = spawn(electronPath, args, { stdio: 'inherit', env, windowsHide: false });
 child.on('exit', (code) => process.exit(code ?? 0));
