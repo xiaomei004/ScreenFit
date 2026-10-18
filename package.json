@@ -1,0 +1,22 @@
+{
+  "name": "screenfit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mirror phone-only apps to the desktop and refit them for a big screen",
+  "main": "out/main/index.js",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "build:main": "tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "dev": "npm run build && electron .",
+    "start": "electron .",
+    "vendor:scrcpy": "node scripts/fetch-scrcpy.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "electron": "^44.9.0",
+    "typescript": "^5.7.3",
+    "vite": "^7.0.0"
+  }
+}

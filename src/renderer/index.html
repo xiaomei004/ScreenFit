@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'" />
+    <title>ScreenFit</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <canvas id="bg"></canvas>
+    <canvas id="fg"></canvas>
+
+    <div id="hud">
+      <select id="device"></select>
+      <button id="connect">直接投屏</button>
+      <input id="display" placeholder="虚拟屏 1920x1080/420" size="18" />
+      <input id="pkg" placeholder="包名，可留空" size="18" />
+      <button id="start-app">虚拟屏启动</button>
+      <span class="sep"></span>
+      <button class="mode" data-mode="contain">原比例</button>
+      <button class="mode" data-mode="cover">裁切铺满</button>
+      <button class="mode" data-mode="ambient">模糊延展</button>
+      <button id="stop">停止</button>
+    </div>
+
+    <div id="status">未连接</div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

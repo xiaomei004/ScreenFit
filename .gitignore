@@ -1,0 +1,12 @@
+node_modules/
+out/
+dist/
+release/
+vendor/*.jar
+vendor/*.zip
+vendor/scrcpy-win64/
+vendor/server.c
+*.log
+.DS_Store
+.env
+.env.local
