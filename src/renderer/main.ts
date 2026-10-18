@@ -29,7 +29,7 @@ window.screenfit.onStatus((status) => {
   else if (status.phase === 'connecting') setStatus(status.message);
   else if (status.phase === 'streaming') {
     const meta = status.meta;
-    setStatus(meta ? `投屏中 ${meta.deviceName} ${meta.width}x${meta.height}` : '投屏中');
+    setStatus(meta ? `投屏中 ${meta.deviceName}（${meta.codec}）` : '投屏中');
   } else setStatus('空闲');
 });
 
@@ -45,28 +45,62 @@ async function refreshDevices(): Promise<void> {
   if (devices.length === 0) setStatus('没有检测到设备，请插上数据线并开启 USB 调试');
 }
 
-window.screenfit.onVideoPort((videoPort) => {
+// 经 preload 的 window.postMessage 接收视频通道端口（避免 contextBridge 丢原型）
+window.addEventListener('message', (event) => {
+  const data = event.data as { screenfit?: string } | undefined;
+  if (data?.screenfit !== 'video-port') return;
+  const videoPort = event.ports[0];
+  if (!videoPort) return;
   port = videoPort;
-  videoPort.onmessage = (event: MessageEvent<StreamMessage>) => {
-    const message = event.data;
+  videoPort.onmessage = (e: MessageEvent<StreamMessage>) => {
+    const message = e.data;
     if (message.type === 'meta') decoder.setMeta(message.meta);
     else decoder.feed(message);
   };
   videoPort.start();
 });
+window.screenfit.forwardVideoPort();
 void window.screenfit.openVideoChannel();
 void refreshDevices();
 setInterval(() => void refreshDevices(), 4000);
 
+// 开发联调：URL 带 #auto 时，检测到设备后自动开始投屏（无需手动点连接）
+if (location.hash.includes('auto')) {
+  // 联调期间禁用手动按钮，排除误触导致的会话重启干扰
+  for (const id of ['connect', 'start-app', 'stop']) {
+    const btn = document.getElementById(id) as HTMLButtonElement | null;
+    if (btn) btn.disabled = true;
+  }
+  // 用状态机防止 interval 并发重入（listDevices 是异步的，标志必须同步置位）
+  let phase: 'wait' | 'busy' | 'done' = 'wait';
+  const autoTimer = setInterval(() => {
+    if (phase !== 'wait') return;
+    phase = 'busy';
+    void window.screenfit.listDevices().then((devices) => {
+      if (devices.length === 0) {
+        phase = 'wait';
+        return;
+      }
+      phase = 'done';
+      clearInterval(autoTimer);
+      setStatus('自动连接设备…');
+      console.log('[ui] auto-connect 触发 startSession');
+      void window.screenfit.startSession({ serial: devices[0].serial, maxSize: 1280 });
+    });
+  }, 1000);
+}
+
 el<HTMLButtonElement>('connect').onclick = async () => {
   const serial = deviceSelect.value;
   if (!serial) return setStatus('先选择一台设备');
+  console.log('[ui] connect 按钮触发');
   await window.screenfit.startSession({ serial, maxSize: 1920 });
 };
 
 el<HTMLButtonElement>('start-app').onclick = async () => {
   const serial = deviceSelect.value;
   if (!serial) return setStatus('先选择一台设备');
+  console.log('[ui] start-app 按钮触发');
   await window.screenfit.startSession({
     serial,
     maxSize: 1920,

@@ -10,9 +10,10 @@ export interface DeviceInfo {
 
 export interface VideoMeta {
   codec: 'h264' | 'h265' | 'av1';
-  width: number;
-  height: number;
   deviceName: string;
+  /** v5 视频 header 不含尺寸，尺寸由 SPS/VideoFrame 解析，这里可选 */
+  width?: number;
+  height?: number;
 }
 
 export type AppStatus =

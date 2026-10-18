@@ -21,13 +21,11 @@ const api = {
   stopSession: (): Promise<void> => ipcRenderer.invoke(IPC.stopSession),
   setFitMode: (mode: FitMode): Promise<void> => ipcRenderer.invoke(IPC.setFitMode, mode),
   openVideoChannel: (): Promise<boolean> => ipcRenderer.invoke(IPC.openVideoChannel),
-  onVideoPort: (callback: (port: MessagePort) => void): (() => void) => {
-    const handler = (event: Electron.IpcRendererEvent) => {
-      const port = event.ports?.[0];
-      if (port) callback(port);
-    };
-    ipcRenderer.on(IPC.videoPort, handler);
-    return () => ipcRenderer.removeListener(IPC.videoPort, handler);
+  // MessagePort 穿过 contextBridge 会丢原型方法，必须经 window.postMessage 转发到主世界
+  forwardVideoPort: (): void => {
+    ipcRenderer.on(IPC.videoPort, (event: Electron.IpcRendererEvent) => {
+      window.postMessage({ screenfit: 'video-port' }, '*', Array.from(event.ports ?? []));
+    });
   },
   onStatus: (callback: (status: AppStatus) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, status: AppStatus) => callback(status);

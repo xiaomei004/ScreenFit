@@ -7,7 +7,8 @@ import type { VideoMeta } from '../shared/types.js';
 export const SERVER_VERSION = '5.0.1';
 const DEVICE_SERVER_PATH = '/data/local/tmp/scrcpy-server.jar';
 
-const CODEC_BY_ID: Record<number, VideoMeta['codec']> = { 1: 'h264', 2: 'h265', 4: 'av1' };
+// v5 视频 header：设备名(64) + 编码名(4字节 ASCII: "h264"/"h265"/"av1")，无 width/height
+const KNOWN_CODECS = new Set(['h264', 'h265', 'av1']);
 
 export const KEYCODE_BACK = 4;
 export const KEYCODE_HOME = 3;
@@ -44,9 +45,11 @@ export interface ScrcpyHandlers {
   onExit?(code: number | null): void;
 }
 
-const FLAG_CONFIG = 1n << 63n;
-const FLAG_KEYFRAME = 1n << 62n;
-const PTS_MASK = (1n << 62n) - 1n;
+// scrcpy v5 packet 位布局（byte0 高3位）：bit63=session标志, bit62=config, bit61=keyframe，低61位=PTS
+const FLAG_SESSION = 1n << 63n;
+const FLAG_CONFIG = 1n << 62n;
+const FLAG_KEYFRAME = 1n << 61n;
+const PTS_MASK = (1n << 61n) - 1n;
 
 /** scrcpy 视频流客户端：部署 server、建立反向隧道、解析视频包 */
 export class ScrcpySession {
@@ -59,6 +62,8 @@ export class ScrcpySession {
   private pendingData: Buffer = Buffer.alloc(0);
   private dataWaiter?: () => void;
   private streamError?: Error;
+  private pendingSockets: net.Socket[] = [];
+  private connectionWaiter?: () => void;
   private serial = '';
   private socketName = '';
 
@@ -73,12 +78,15 @@ export class ScrcpySession {
 
   async start(options: ScrcpyOptions): Promise<void> {
     if (this.running) throw new Error('会话已经在运行');
-    const scid = Math.floor(Math.random() * 0xffffffff) >>> 0;
+    // scid 是 32 位有符号 int，必须 <= 0x7fffffff，否则 server 端 parseInt radix16 溢出
+    const scid = Math.floor(Math.random() * 0x7fffffff) >>> 0;
     const socketName = `scrcpy_${scid.toString(16).padStart(8, '0')}`;
     this.serial = options.serial;
     this.socketName = socketName;
     this.pendingData = Buffer.alloc(0);
     this.streamError = undefined;
+    this.pendingSockets = [];
+    this.connectionWaiter = undefined;
 
     this.handlers.onStatus?.('部署 scrcpy-server 到设备');
     await this.adb.push(options.serial, options.serverJar, DEVICE_SERVER_PATH);
@@ -106,7 +114,6 @@ export class ScrcpySession {
     try {
       await this.awaitConnections(Boolean(options.audio));
       this.running = true;
-      this.attachVideoData();
     } catch (err) {
       await this.stopInternal();
       throw err;
@@ -157,6 +164,15 @@ export class ScrcpySession {
     return new Promise((resolve, reject) => {
       const server = net.createServer();
       server.on('error', reject);
+      // video 与 control 连接几乎同时到达，必须用常驻监听器把连接入队，
+      // 否则 once('connection') 会在两次 accept 的间隙漏掉第二个连接
+      server.on('connection', (socket) => {
+        socket.setNoDelay(true);
+        this.pendingSockets.push(socket);
+        const waiter = this.connectionWaiter;
+        this.connectionWaiter = undefined;
+        waiter?.();
+      });
       server.listen(0, '127.0.0.1', () => {
         const address = server.address();
         if (address && typeof address === 'object') {
@@ -169,32 +185,34 @@ export class ScrcpySession {
     });
   }
 
-  private accept(): Promise<net.Socket> {
-    return new Promise((resolve, reject) => {
-      const server = this.tcpServer;
-      if (!server) return reject(new Error('隧道未就绪'));
-      const timer = setTimeout(() => reject(new Error('等待设备连接超时（20 秒）')), 20_000);
-      server.once('connection', (socket) => {
-        clearTimeout(timer);
-        socket.setNoDelay(true);
-        resolve(socket);
+  private async accept(label: string): Promise<net.Socket> {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const socket = this.pendingSockets.shift();
+      if (socket) return socket;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error(`等待设备连接（${label}）超时`);
+      await new Promise<void>((resolve) => {
+        this.connectionWaiter = resolve;
+        setTimeout(resolve, remaining);
       });
-    });
+    }
   }
 
   private async awaitConnections(audio: boolean): Promise<void> {
     this.handlers.onStatus?.('等待设备连接视频通道');
-    this.videoSocket = await this.accept();
-    // 首个连接会先发一个 dummy 字节，用于同步握手
-    await this.readExact(this.videoSocket, 1);
+    this.videoSocket = await this.accept('video');
+    // v5 reverse 模式下视频 socket 直接发设备名，无 dummy 字节
+    // 必须在 readVideoHeader 之前绑定数据事件，否则 readExact 永远等不到数据
+    this.attachVideoData();
 
     if (audio) {
       this.handlers.onStatus?.('等待设备连接音频通道');
-      this.audioSocket = await this.accept();
+      this.audioSocket = await this.accept('audio');
     }
 
     this.handlers.onStatus?.('等待设备连接控制通道');
-    this.controlSocket = await this.accept();
+    this.controlSocket = await this.accept('control');
 
     const header = await this.readVideoHeader(this.videoSocket);
     this.handlers.onMeta?.(header);
@@ -203,16 +221,22 @@ export class ScrcpySession {
   private async readVideoHeader(socket: net.Socket): Promise<VideoMeta> {
     const nameBuf = await this.readExact(socket, 64);
     const deviceName = nameBuf.toString('utf8').replace(/\0+$/, '').trim();
-    const codecBuf = await this.readExact(socket, 1);
-    const codecId = codecBuf[0];
-    const sizeBuf = await this.readExact(socket, 8);
-    const width = sizeBuf.readUInt32BE(0);
-    const height = sizeBuf.readUInt32BE(4);
-    const codec = CODEC_BY_ID[codecId] ?? 'h264';
-    if (!CODEC_BY_ID[codecId]) {
-      this.handlers.onStatus?.(`未知编码 id=${codecId}，按 h264 处理`);
+    const codecBuf = await this.readExact(socket, 4);
+    const codecStr = codecBuf.toString('ascii');
+    const codec = (KNOWN_CODECS.has(codecStr) ? codecStr : 'h264') as VideoMeta['codec'];
+    if (!KNOWN_CODECS.has(codecStr)) {
+      this.handlers.onStatus?.(`未知编码 "${codecStr}"，按 h264 处理`);
     }
-    return { codec, width, height, deviceName };
+    // codec id 之后紧跟一个 session packet（12字节，MSB=1）：byte4-7=width, byte8-11=height
+    const sessionPacket = await this.readExact(socket, 12);
+    const flags = sessionPacket.readBigUInt64BE(0);
+    let width: number | undefined;
+    let height: number | undefined;
+    if ((flags & FLAG_SESSION) !== 0n) {
+      width = sessionPacket.readUInt32BE(4);
+      height = sessionPacket.readUInt32BE(8);
+    }
+    return { codec, deviceName, width, height };
   }
 
   private async readVideoLoop(): Promise<void> {
@@ -222,6 +246,13 @@ export class ScrcpySession {
       while (this.running) {
         const header = await this.readExact(socket, 12);
         const ptsFlags = header.readBigUInt64BE(0);
+        // session packet（MSB=1）：12字节定长、无 payload，byte4-7=width byte8-11=height，仅更新尺寸
+        if ((ptsFlags & FLAG_SESSION) !== 0n) {
+          const w = header.readUInt32BE(4);
+          const h = header.readUInt32BE(8);
+          this.handlers.onStatus?.(`[session] 尺寸变更 ${w}x${h}`);
+          continue;
+        }
         const size = header.readUInt32BE(8);
         const payload = await this.readExact(socket, size);
         this.handlers.onVideo?.({
@@ -264,7 +295,7 @@ export class ScrcpySession {
     });
   }
 
-  private async readExact(socket: net.Socket, length: number): Promise<Buffer> {
+  private async readExact(socket: net.Socket, length: number, tag = ''): Promise<Buffer> {
     if (length === 0) return Buffer.alloc(0);
     for (;;) {
       if (this.streamError) throw this.streamError;

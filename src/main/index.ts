@@ -14,6 +14,7 @@ const currentDir = path.dirname(fileURLToPath(import.meta.url));
 
 const adb = new Adb();
 let session: ScrcpySession | null = null;
+let startingSession = false;
 let videoPort: MessagePortMain | null = null;
 let mainWindow: BrowserWindowType | null = null;
 let activeSerial = '';
@@ -23,6 +24,8 @@ const SERVER_JAR =
   path.join(currentDir, '../../vendor/scrcpy-win64/scrcpy-win64-v5.0.1/scrcpy-server');
 
 function setStatus(status: AppStatus): void {
+  const msg = status.phase === 'connecting' ? status.message : status.phase;
+  console.log('[status]', msg);
   mainWindow?.webContents.send(IPC.status, status);
 }
 
@@ -36,15 +39,25 @@ function createWindow(): void {
     backgroundColor: '#000000',
     show: false,
     webPreferences: {
-      preload: path.join(currentDir, '../preload/index.js'),
+      preload: path.join(currentDir, '../preload/index.mjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: false,
       backgroundThrottling: false,
     },
   });
 
+  // 把渲染进程的 console / preload 错误转发到主进程日志，便于联调
+  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    console.log(`[renderer:${level}] ${message} (${path.basename(sourceId)}:${line})`);
+  });
+  win.webContents.on('preload-error', (_e, preloadPath, error) => {
+    console.error(`[preload-error] ${preloadPath}:`, error);
+  });
+
   win.once('ready-to-show', () => win.show());
-  win.loadFile(path.join(currentDir, '../renderer/index.html'));
+  const auto = process.env.SCREENFIT_AUTO === '1';
+  win.loadFile(path.join(currentDir, '../renderer/index.html'), auto ? { hash: 'auto' } : undefined);
   mainWindow = win;
 }
 
@@ -106,8 +119,15 @@ function registerIpc(): void {
   });
 
   ipcMain.handle(IPC.startSession, async (_event, options) => {
-    if (session?.isRunning) await session.stop();
-    activeSerial = options.serial;
+    if (startingSession) {
+      console.log('[status] 已有会话正在建立，忽略重复请求');
+      return;
+    }
+    startingSession = true;
+    console.log('[ipc] startSession', JSON.stringify(options));
+    try {
+      if (session?.isRunning) await session.stop();
+      activeSerial = options.serial;
     session = new ScrcpySession(adb, {
       onStatus: (message) => setStatus({ phase: 'connecting', message }),
       onMeta: (meta) => {
@@ -124,7 +144,10 @@ function registerIpc(): void {
           config: packet.config,
         });
       },
-      onExit: () => setStatus({ phase: 'idle' }),
+      onExit: (code) => {
+        console.log('[ipc] scrcpy-server 退出, code=', code);
+        setStatus({ phase: 'idle' });
+      },
     });
 
     try {
@@ -139,9 +162,12 @@ function registerIpc(): void {
         keepActive: options.keepActive ?? true,
         audio: options.audio ?? false,
       });
-    } catch (err) {
-      setStatus({ phase: 'error', message: (err as Error).message });
-      throw err;
+      } catch (err) {
+        setStatus({ phase: 'error', message: (err as Error).message });
+        throw err;
+      }
+    } finally {
+      startingSession = false;
     }
   });
 
@@ -150,6 +176,9 @@ function registerIpc(): void {
     session = null;
     setStatus({ phase: 'idle' });
   });
+
+  // 渲染进程本地已切换渲染模式，这里仅接收以避免未注册报错（后续可按 App 持久化）
+  ipcMain.handle(IPC.setFitMode, async () => true);
 }
 
 app.whenReady().then(() => {

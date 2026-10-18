@@ -19,7 +19,7 @@ declare global {
       stopSession(): Promise<void>;
       setFitMode(mode: FitMode): Promise<void>;
       openVideoChannel(): Promise<boolean>;
-      onVideoPort(callback: (port: MessagePort) => void): () => void;
+      forwardVideoPort(): void;
       onStatus(callback: (status: AppStatus) => void): () => void;
     };
   }

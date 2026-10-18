@@ -29,8 +29,7 @@ export class StreamDecoder {
     decoder.configure({
       codec: avcCodecString(spsPps.sps),
       description: buildAvcC(spsPps.sps, spsPps.pps),
-      codedWidth: this.meta?.width,
-      codedHeight: this.meta?.height,
+      // 不传 codedWidth/codedHeight，由 WebCodecs 从 SPS 解析（v5 header 不含尺寸）
       optimizeForLatency: true,
       hardwareAcceleration: 'prefer-hardware',
     });
@@ -42,6 +41,9 @@ export class StreamDecoder {
     const bytes = new Uint8Array(packet.data);
     if (packet.config) {
       if (!this.ensureDecoder(bytes)) return;
+      // 纯 config 包（SPS/PPS，非 keyframe）只用于初始化解码器，不参与 decode；
+      // WebCodecs 要求 configure 后首个 decode 必须是 key frame
+      if (!packet.keyframe) return;
     }
     if (!this.decoder) return;
     const chunk = new EncodedVideoChunk({
