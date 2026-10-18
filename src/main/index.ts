@@ -1,19 +1,26 @@
 import * as path from 'node:path';
-import { app, BrowserWindow, ipcMain, MessageChannelMain } from 'electron';
-import { Adb } from './adb';
-import { KEYCODE_APP_SWITCH, KEYCODE_BACK, KEYCODE_HOME, ScrcpySession } from './scrcpy';
-import { IPC } from '../shared/types';
-import type { AppStatus, ControlMessage } from '../shared/types';
+import { fileURLToPath } from 'node:url';
+import electron from 'electron';
+import type { BrowserWindow as BrowserWindowType, MessagePortMain } from 'electron';
+import { Adb } from './adb.js';
+import { KEYCODE_APP_SWITCH, KEYCODE_BACK, KEYCODE_HOME, ScrcpySession } from './scrcpy.js';
+import { IPC } from '../shared/types.js';
+import type { AppStatus, ControlMessage } from '../shared/types.js';
+
+const { app, BrowserWindow, ipcMain, MessageChannelMain } = electron;
+
+// ESM 下没有 __dirname，用 import.meta.url 推导
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
 
 const adb = new Adb();
 let session: ScrcpySession | null = null;
-let videoPort: Electron.MessagePortMain | null = null;
-let mainWindow: BrowserWindow | null = null;
+let videoPort: MessagePortMain | null = null;
+let mainWindow: BrowserWindowType | null = null;
 let activeSerial = '';
 
 const SERVER_JAR =
   process.env.SCREENFIT_SERVER_JAR ??
-  path.join(__dirname, '../../vendor/scrcpy-win64/scrcpy-win64-v5.0.1/scrcpy-server');
+  path.join(currentDir, '../../vendor/scrcpy-win64/scrcpy-win64-v5.0.1/scrcpy-server');
 
 function setStatus(status: AppStatus): void {
   mainWindow?.webContents.send(IPC.status, status);
@@ -29,7 +36,7 @@ function createWindow(): void {
     backgroundColor: '#000000',
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, '../preload/index.js'),
+      preload: path.join(currentDir, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false,
@@ -37,7 +44,7 @@ function createWindow(): void {
   });
 
   win.once('ready-to-show', () => win.show());
-  win.loadFile(path.join(__dirname, '../renderer/index.html'));
+  win.loadFile(path.join(currentDir, '../renderer/index.html'));
   mainWindow = win;
 }
 

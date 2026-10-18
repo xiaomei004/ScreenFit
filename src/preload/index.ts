@@ -1,6 +1,8 @@
-import { contextBridge, ipcRenderer } from 'electron';
-import { IPC } from '../shared/types';
-import type { AppStatus, DeviceInfo, FitMode } from '../shared/types';
+import electron from 'electron';
+import { IPC } from '../shared/types.js';
+import type { AppStatus, DeviceInfo, FitMode } from '../shared/types.js';
+
+const { contextBridge, ipcRenderer } = electron;
 
 export interface SessionOptions {
   serial: string;

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { DeviceInfo } from '../shared/types';
+import type { DeviceInfo } from '../shared/types.js';
 
 const execFileAsync = promisify(execFile);
 

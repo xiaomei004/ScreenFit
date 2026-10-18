@@ -1,8 +1,8 @@
 import * as net from 'node:net';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { spawn } from 'node:child_process';
-import type { Adb } from './adb';
-import type { VideoMeta } from '../shared/types';
+import type { Adb } from './adb.js';
+import type { VideoMeta } from '../shared/types.js';
 
 export const SERVER_VERSION = '5.0.1';
 const DEVICE_SERVER_PATH = '/data/local/tmp/scrcpy-server.jar';
