@@ -54,27 +54,47 @@ adb shell wm set-ignore-orientation-request -d 5 true
 `tv.danmaku.bili` 启动到虚拟屏后首页仍为竖屏信息流（见 `spike-b-bilibili.png`）。
 信息流页本来就是竖屏设计，符合预期；真正的横屏差异需要进入播放页才体现，待后续验证。
 
-## ⚠️ 关键阻塞项：MIUI 输入注入限制
+## 目标 App 复测：红果免费短剧 — ✅ 可投屏 / ❌ 不重排
+
+包名定位：`com.phoenix.read`（字节系动物命名：番茄小说 = `com.dragon.read`，红果 = `com.phoenix.read`）。
+用 `scrcpy --start-app="?红果"` 按名称检索确认。
+
+```
+scrcpy --new-display=1920x1080/240 --start-app=+com.phoenix.read --stay-awake
+[server] INFO: Starting app "红果免费短剧" [com.phoenix.read] on display 6
+INFO: Texture (D3D11VA): 1920x1088
+```
+
+结果与抖音一致：竖屏 UI 居中、左右黑边（见 `spike-hongguo.png`），不随虚拟屏重排为横屏。
+
+**关键洞察**：红果的视频内容本身多为 16:9 横屏拍摄（截图中"仙界归来"一剧即横屏画面），
+只是被竖屏 UI 包裹。**L1 的 cover（裁切铺满）模式能把视频区抠出来铺满电脑全屏**，
+正好命中这个场景 —— 这是产品对短剧类 App 的核心价值点。
+
+## 输入注入复测：✅ 已恢复
+
+用户开启「USB 调试（安全设置）」后重测，`--stay-awake` 周期性模拟用户活动，
+日志中 **INJECT_EVENTS 错误数为 0**。键鼠反向控制链路打通。
+
+## ⚠️ 关键阻塞项（历史记录，已解决）：MIUI 输入注入限制
 
 ```
 [server] ERROR: Injecting input events requires the caller ... to have the INJECT_EVENTS permission.
 [server] ERROR: Make sure you have enabled "USB debugging (Security Settings)" and then rebooted your device.
 ```
 
-小米/红米设备上 scrcpy **无法注入点击、滑动、按键**，除非开发者选项里开启
-「USB 调试（安全设置）」（MIUI 通常还要求登录小米账号，部分版本要求插 SIM 卡，且需重启）。
-
-影响：投屏能看，但**电脑端无法控制手机**，键鼠映射功能全部失效，直到用户开启该开关。
-这必须做成 onboarding 引导步骤。
+小米/红米设备默认关闭「USB 调试（安全设置）」时，scrcpy **无法注入点击、滑动、按键**，
+日志会刷 `INJECT_EVENTS permission` 错误（首次 Spike 实测遇到）。
+开启该开关并重启后即恢复。这必须做成 onboarding 引导步骤（检测 + 引导用户开启）。
 
 ## 对产品方向的结论
 
 | 路线 | 结论 |
 |---|---|
-| L1 画面填充（模糊延展 / 裁切铺满） | ✅ 确定可行，应作为核心卖点 |
-| L2 虚拟显示让 App 重排 | ⚠️ 仅对本身实现了大屏/横屏布局的 App 有效；抖音、短剧类锁竖屏 App 无效 |
+| L1 画面填充（模糊延展 / 裁切铺满） | ✅ 确定可行，应作为核心卖点；红果横屏视频用 cover 裁切铺满效果最佳 |
+| L2 虚拟显示让 App 重排 | ⚠️ 仅对本身实现了大屏/横屏布局的 App 有效；抖音、红果等锁竖屏 App 无效 |
 | L3 系统级强制 | ❌ 未 root 下对布局写死竖屏的 App 无解 |
-| 键鼠控制 | ⚠️ 受 MIUI 安全设置限制，需用户手动开启 |
+| 键鼠控制 | ✅ MIUI 开启「USB 调试（安全设置）」后可用；onboarding 需引导 |
 
 **产品定位调整建议**：不承诺"让竖屏 App 变横屏"，而是承诺
 "把手机画面高质量铺满电脑全屏 + 键鼠控制 + 对每个 App 记住最佳填充参数"。
