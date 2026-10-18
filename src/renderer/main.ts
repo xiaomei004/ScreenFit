@@ -66,11 +66,6 @@ setInterval(() => void refreshDevices(), 4000);
 
 // 开发联调：URL 带 #auto 时，检测到设备后自动开始投屏（无需手动点连接）
 if (location.hash.includes('auto')) {
-  // 联调期间禁用手动按钮，排除误触导致的会话重启干扰
-  for (const id of ['connect', 'start-app', 'stop']) {
-    const btn = document.getElementById(id) as HTMLButtonElement | null;
-    if (btn) btn.disabled = true;
-  }
   // 用状态机防止 interval 并发重入（listDevices 是异步的，标志必须同步置位）
   let phase: 'wait' | 'busy' | 'done' = 'wait';
   const autoTimer = setInterval(() => {
